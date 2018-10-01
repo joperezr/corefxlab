@@ -22,8 +22,8 @@ namespace System.Devices.Gpio.Samples
 
         private enum RaspberryPiSettings
         {
-            Led = 26,
-            Button = 18,
+            Led = 18,
+            Button = 3,
             SpiBusId = 0,
             SpiChipSelectLine = 8,
             I2cBusId = 1

@@ -14,7 +14,17 @@ namespace System.Devices.Gpio
         #region RegisterView        
 
         [StructLayout(LayoutKind.Explicit)]
-        private struct RegisterView
+        private struct ClockManagerRegisterView
+        {
+            [FieldOffset(0x00)]
+            public uint GPCTL;
+
+            [FieldOffset(0x04)]
+            public uint GPDIV;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct GPIORegisterView
         {
             ///<summary>GPIO Function Select, 6x32 bits, R/W</summary>
             [FieldOffset(0x00)]
@@ -69,6 +79,27 @@ namespace System.Devices.Gpio
             public fixed uint GPPUDCLK[2];
         }
 
+        [StructLayout(LayoutKind.Explicit)]
+        private struct PWMRegisterView
+        {
+            [FieldOffset(0x00)]
+            public uint CTL;
+            [FieldOffset(0x04)]
+            public uint STA;
+            [FieldOffset(0x08)]
+            public uint DMAC;
+            [FieldOffset(0x10)]
+            public uint RNG1;
+            [FieldOffset(0x14)]
+            public uint DAT1;
+            [FieldOffset(0x18)]
+            public uint FIF1;
+            [FieldOffset(0x20)]
+            public uint RNG2;
+            [FieldOffset(0x24)]
+            public uint DAT2;
+        }
+
         #endregion
 
         #region Interop
@@ -113,10 +144,17 @@ namespace System.Devices.Gpio
 
         #endregion
 
-        private const string GpioMemoryFilePath = "/dev/gpiomem";
-        private const int GpioBaseOffset = 0;
+        private const string GpioMemoryFilePath = "/dev/mem";
 
-        private RegisterView* _registerViewPointer = null;
+        private const int GpioBaseOffset = 0x200000;
+        private const int ClockBaseOffset = 0x101070;
+        private const int PWMBaseOffset = 0x20C000;
+
+        private const int PeripheralsBaseAddress = 0x3F000000;
+
+        private GPIORegisterView* _gpioRegisterViewPointer = null;
+        private ClockManagerRegisterView* _clockRegisterViewPointer = null;
+        private PWMRegisterView* _pwmRegisterViewPointer = null;
 
         private int _pinsToDetectEventsCount;
         private IList<int> _pinsToDetectEvents;
@@ -130,7 +168,7 @@ namespace System.Devices.Gpio
 
         private void Initialize()
         {
-            if (_registerViewPointer != null)
+            if (_gpioRegisterViewPointer != null)
             {
                 return;
             }
@@ -144,18 +182,36 @@ namespace System.Devices.Gpio
 
             //Console.WriteLine($"file descriptor = {fileDescriptor}");
 
-            IntPtr mapPointer = mmap(IntPtr.Zero, Environment.SystemPageSize, MemoryMappedProtections.PROT_READ | MemoryMappedProtections.PROT_WRITE, MemoryMappedFlags.MAP_SHARED, fileDescriptor, GpioBaseOffset);
+            IntPtr mapPointer = mmap(IntPtr.Zero, Environment.SystemPageSize, MemoryMappedProtections.PROT_READ | MemoryMappedProtections.PROT_WRITE, MemoryMappedFlags.MAP_SHARED, fileDescriptor, PeripheralsBaseAddress + GpioBaseOffset);
 
             if (mapPointer.ToInt32() < 0)
             {
                 throw Utils.CreateIOException("Error initializing Gpio driver", mapPointer.ToInt32());
             }
 
+            _gpioRegisterViewPointer = (GPIORegisterView*)mapPointer;
+
+            mapPointer = mmap(IntPtr.Zero, Environment.SystemPageSize, MemoryMappedProtections.PROT_READ | MemoryMappedProtections.PROT_WRITE, MemoryMappedFlags.MAP_SHARED, fileDescriptor, PeripheralsBaseAddress + ClockBaseOffset);
+
+            if (mapPointer.ToInt32() < 0)
+            {
+                throw Utils.CreateIOException("Error initializing Gpio driver", mapPointer.ToInt32());
+            }
+
+            _clockRegisterViewPointer = (ClockManagerRegisterView*)mapPointer;
+
+            mapPointer = mmap(IntPtr.Zero, Environment.SystemPageSize, MemoryMappedProtections.PROT_READ | MemoryMappedProtections.PROT_WRITE, MemoryMappedFlags.MAP_SHARED, fileDescriptor, PeripheralsBaseAddress + PWMBaseOffset);
+
+            if (mapPointer.ToInt32() < 0)
+            {
+                throw Utils.CreateIOException("Error initializing Gpio driver", mapPointer.ToInt32());
+            }
+
+            _pwmRegisterViewPointer = (PWMRegisterView*)mapPointer;
+
             //Console.WriteLine($"mmap returned address = {mapPointer.ToInt32():X16}");
 
             close(fileDescriptor);
-
-            _registerViewPointer = (RegisterView*)mapPointer;
 
             _pinsToDetectEvents = new List<int>(PinCount);
             _debounceTimeouts = new Dictionary<int, TimeSpan>(PinCount);
@@ -166,10 +222,10 @@ namespace System.Devices.Gpio
         {
             _pinsToDetectEventsCount = 0;
 
-            if (_registerViewPointer != null)
+            if (_gpioRegisterViewPointer != null)
             {
-                munmap((IntPtr)_registerViewPointer, 0);
-                _registerViewPointer = null;
+                munmap((IntPtr)_gpioRegisterViewPointer, 0);
+                _gpioRegisterViewPointer = null;
             }
         }
 
@@ -250,7 +306,7 @@ namespace System.Devices.Gpio
             //Thread.SpinWait(150);
             //SetBit(RegisterViewPointer->GPPUDCLK, pin, 0U);
 
-            uint* gppudPointer = &_registerViewPointer->GPPUD;
+            uint* gppudPointer = &_gpioRegisterViewPointer->GPPUD;
 
             //Console.WriteLine($"{nameof(RegisterView.GPPUD)} register address = {(long)gppudPointer:X16}");
 
@@ -270,7 +326,7 @@ namespace System.Devices.Gpio
 
             int index = gpioPinNumber / 32;
             int shift = gpioPinNumber % 32;
-            uint* gppudclkPointer = &_registerViewPointer->GPPUDCLK[index];
+            uint* gppudclkPointer = &_gpioRegisterViewPointer->GPPUDCLK[index];
 
             //Console.WriteLine($"{nameof(RegisterView.GPPUDCLK)} register address = {(long)gppudclkPointer:X16}");
 
@@ -303,7 +359,7 @@ namespace System.Devices.Gpio
 
             int index = gpioPinNumber / 10;
             int shift = (gpioPinNumber % 10) * 3;
-            uint* registerPointer = &_registerViewPointer->GPFSEL[index];
+            uint* registerPointer = &_gpioRegisterViewPointer->GPFSEL[index];
 
             //Console.WriteLine($"{nameof(RegisterView.GPFSEL)} register address = {(long)registerPointer:X16}");
 
@@ -327,7 +383,7 @@ namespace System.Devices.Gpio
 
             int index = gpioPinNumber / 10;
             int shift = (gpioPinNumber % 10) * 3;
-            uint register = _registerViewPointer->GPFSEL[index];
+            uint register = _gpioRegisterViewPointer->GPFSEL[index];
             uint mode = (register >> shift) & 0b111U;
 
             PinMode result = GPFSELToPinMode(mode);
@@ -429,13 +485,13 @@ namespace System.Devices.Gpio
             switch (value)
             {
                 case PinValue.High:
-                    registerPointer = &_registerViewPointer->GPSET[index];
-                    registerName = nameof(RegisterView.GPSET);
+                    registerPointer = &_gpioRegisterViewPointer->GPSET[index];
+                    registerName = nameof(GPIORegisterView.GPSET);
                     break;
 
                 case PinValue.Low:
-                    registerPointer = &_registerViewPointer->GPCLR[index];
-                    registerName = nameof(RegisterView.GPCLR);
+                    registerPointer = &_gpioRegisterViewPointer->GPCLR[index];
+                    registerName = nameof(GPIORegisterView.GPCLR);
                     break;
 
                 default:
@@ -451,6 +507,26 @@ namespace System.Devices.Gpio
             *registerPointer = register;
         }
 
+        protected internal void PWMMode(int gpioPinNumber, uint divisor)
+        {
+            this.SetPinMode(gpioPinNumber, 0x02);
+            uint* registerPointer = &_clockRegisterViewPointer->GPCTL;
+            *registerPointer = 0x5A000000 | 1 << 5; //Kill the clock: 0x5A000000 is the clock admin password, and 1 << 5 is flipping the kill bit on the clock.
+
+            Thread.SpinWait(10); //wait 10 cycles
+
+            while ((*registerPointer & 1U << 7) != 0U) // Wait till clock is not busy
+            {
+                ;
+            }
+
+            registerPointer = &_clockRegisterViewPointer->GPDIV;
+            *registerPointer = 0x5A000000 | divisor << 12; // 0x5A000000 is the clock admin password, and the << 12 is because bits 12 to 24 represent the integer part of the divisor
+
+            registerPointer = &_clockRegisterViewPointer->GPCTL;
+            *registerPointer = 0x5A000000 | 0x11; //   0x5A000000 is the clock admin password, and 0x11 means that the clock source is the ground and that the clock generator should be enabled.         
+        }
+
         protected internal override PinValue Input(int gpioPinNumber)
         {
             ValidatePinNumber(gpioPinNumber);
@@ -459,7 +535,7 @@ namespace System.Devices.Gpio
 
             int index = gpioPinNumber / 32;
             int shift = gpioPinNumber % 32;
-            uint register = _registerViewPointer->GPLEV[index];
+            uint register = _gpioRegisterViewPointer->GPLEV[index];
             uint value = (register >> shift) & 1;
 
             PinValue result = Convert.ToBoolean(value) ? PinValue.High : PinValue.Low;
@@ -551,33 +627,33 @@ namespace System.Devices.Gpio
             switch (kind)
             {
                 case PinEvent.High:
-                    registerPointer = &_registerViewPointer->GPHEN[index];
-                    registerName = nameof(RegisterView.GPHEN);
+                    registerPointer = &_gpioRegisterViewPointer->GPHEN[index];
+                    registerName = nameof(GPIORegisterView.GPHEN);
                     break;
 
                 case PinEvent.Low:
-                    registerPointer = &_registerViewPointer->GPLEN[index];
-                    registerName = nameof(RegisterView.GPLEN);
+                    registerPointer = &_gpioRegisterViewPointer->GPLEN[index];
+                    registerName = nameof(GPIORegisterView.GPLEN);
                     break;
 
                 case PinEvent.SyncRisingEdge:
-                    registerPointer = &_registerViewPointer->GPREN[index];
-                    registerName = nameof(RegisterView.GPREN);
+                    registerPointer = &_gpioRegisterViewPointer->GPREN[index];
+                    registerName = nameof(GPIORegisterView.GPREN);
                     break;
 
                 case PinEvent.SyncFallingEdge:
-                    registerPointer = &_registerViewPointer->GPFEN[index];
-                    registerName = nameof(RegisterView.GPFEN);
+                    registerPointer = &_gpioRegisterViewPointer->GPFEN[index];
+                    registerName = nameof(GPIORegisterView.GPFEN);
                     break;
 
                 case PinEvent.AsyncRisingEdge:
-                    registerPointer = &_registerViewPointer->GPAREN[index];
-                    registerName = nameof(RegisterView.GPAREN);
+                    registerPointer = &_gpioRegisterViewPointer->GPAREN[index];
+                    registerName = nameof(GPIORegisterView.GPAREN);
                     break;
 
                 case PinEvent.AsyncFallingEdge:
-                    registerPointer = &_registerViewPointer->GPAFEN[index];
-                    registerName = nameof(RegisterView.GPAFEN);
+                    registerPointer = &_gpioRegisterViewPointer->GPAFEN[index];
+                    registerName = nameof(GPIORegisterView.GPAFEN);
                     break;
 
                 default:
@@ -693,27 +769,27 @@ namespace System.Devices.Gpio
             switch (kind)
             {
                 case PinEvent.High:
-                    register = _registerViewPointer->GPHEN[index];
+                    register = _gpioRegisterViewPointer->GPHEN[index];
                     break;
 
                 case PinEvent.Low:
-                    register = _registerViewPointer->GPLEN[index];
+                    register = _gpioRegisterViewPointer->GPLEN[index];
                     break;
 
                 case PinEvent.SyncRisingEdge:
-                    register = _registerViewPointer->GPREN[index];
+                    register = _gpioRegisterViewPointer->GPREN[index];
                     break;
 
                 case PinEvent.SyncFallingEdge:
-                    register = _registerViewPointer->GPFEN[index];
+                    register = _gpioRegisterViewPointer->GPFEN[index];
                     break;
 
                 case PinEvent.AsyncRisingEdge:
-                    register = _registerViewPointer->GPAREN[index];
+                    register = _gpioRegisterViewPointer->GPAREN[index];
                     break;
 
                 case PinEvent.AsyncFallingEdge:
-                    register = _registerViewPointer->GPAFEN[index];
+                    register = _gpioRegisterViewPointer->GPAFEN[index];
                     break;
 
                 default:
@@ -807,7 +883,7 @@ namespace System.Devices.Gpio
 
             int index = gpioPinNumber / 32;
             int shift = gpioPinNumber % 32;
-            uint register = _registerViewPointer->GPEDS[index];
+            uint register = _gpioRegisterViewPointer->GPEDS[index];
             uint value = (register >> shift) & 1;
 
             bool result = Convert.ToBoolean(value);
@@ -851,7 +927,7 @@ namespace System.Devices.Gpio
 
             int index = gpioPinNumber / 32;
             int shift = gpioPinNumber % 32;
-            uint* registerPointer = &_registerViewPointer->GPEDS[index];
+            uint* registerPointer = &_gpioRegisterViewPointer->GPEDS[index];
 
             //Console.WriteLine($"{nameof(RegisterView.GPEDS)} register address = {(long)registerPointer:X16}");
 
